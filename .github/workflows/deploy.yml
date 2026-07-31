@@ -29,6 +29,13 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # Palette samples per block, so daily builds only analyse new blocks.
+      - uses: actions/cache@v4
+        with:
+          path: .cache
+          key: palettes-${{ github.run_id }}
+          restore-keys: |
+            palettes-
       - run: npm run build
         env:
           ARENA_ACCESS_TOKEN: ${{ secrets.ARENA_ACCESS_TOKEN }}

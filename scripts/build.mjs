@@ -1,13 +1,15 @@
 /**
- * block — one block a day from the Are.na "Aesthetic" channel.
+ * block — one block a day from an Are.na channel.
  *
- * Fetches the channel via Are.na's v3 REST API, picks one image block
- * deterministically from today's date (Australia/Melbourne), samples the
- * image's dominant colour and mood (light/dark), and writes a fully static
- * page to dist/. Runs daily via GitHub Actions.
+ * Fetches the channel via Are.na's v3 REST API and picks one image block per
+ * day, deterministically from the date. The channel's block count sets the
+ * depth of history: N blocks → N days, scrubbable via the timeline ruler at
+ * the top edge. Each day's dominant colour and mood (light/dark) are sampled
+ * at build time (cached in .cache/ between runs) and the whole history is
+ * baked into a fully static page in dist/. Runs daily via GitHub Actions.
  */
 
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
@@ -32,6 +34,7 @@ const FONT_URL = process.env.FONT_URL || "";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dist = path.join(root, "dist");
+const cacheFile = path.join(root, ".cache", "palettes.json");
 
 async function api(url) {
   const res = await fetch(url, {
@@ -41,9 +44,30 @@ async function api(url) {
   return res.json();
 }
 
+async function fetchBuffer(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`${res.status} fetching ${url}`);
+  return Buffer.from(await res.arrayBuffer());
+}
+
+async function mapLimit(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (next < items.length) {
+        const i = next++;
+        results[i] = await fn(items[i], i);
+      }
+    })
+  );
+  return results;
+}
+
 // ---------------------------------------------------------------------------
-// Pick of the day — FNV-1a over the local date so the choice is stable for
-// the whole day and changes at local midnight.
+// Picks — FNV-1a over each local date, so every day of history is stable and
+// today's choice flips at local midnight. N blocks in the channel → N days
+// of history ending today.
 
 function today() {
   return new Intl.DateTimeFormat("en-CA", {
@@ -63,26 +87,37 @@ function fnv1a(str) {
   return h;
 }
 
-async function pickBlock() {
+async function fetchAllBlocks() {
   const channel = await api(`${API}/channels/${CHANNEL}`);
   const total = channel.counts.contents;
   if (!total) throw new Error("Channel is empty");
-
-  const date = today();
-  let index = fnv1a(date) % total;
-
-  // Walk forward (wrapping) until we land on an image block.
-  for (let tries = 0; tries < Math.min(total, 40); tries++) {
-    const page = (index % total) + 1; // per=1 → page number is 1-based index
+  const blocks = [];
+  for (let page = 1; blocks.length < total; page++) {
     const { data } = await api(
-      `${API}/channels/${CHANNEL}/contents?per=1&page=${page}`
+      `${API}/channels/${CHANNEL}/contents?per=100&page=${page}`
     );
-    const block = data?.[0];
-    if (block?.type === "Image" && block.image?.src)
-      return { block, date, channel };
-    index++;
+    if (!data?.length) break;
+    blocks.push(...data);
   }
-  throw new Error("No image block found near today's index");
+  return { channel, blocks };
+}
+
+function pickForDate(date, blocks) {
+  let index = fnv1a(date) % blocks.length;
+  // Walk forward (wrapping) until we land on an image block.
+  for (let tries = 0; tries < Math.min(blocks.length, 40); tries++) {
+    const block = blocks[(index + tries) % blocks.length];
+    if (block?.type === "Image" && block.image?.src) return block;
+  }
+  return null;
+}
+
+function datesEndingToday(n) {
+  const [y, m, d] = today().split("-").map(Number);
+  const base = Date.UTC(y, m - 1, d);
+  return Array.from({ length: n }, (_, i) =>
+    new Date(base - (n - 1 - i) * 86400000).toISOString().slice(0, 10)
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -151,9 +186,6 @@ async function paletteFrom(buffer) {
   const luma = lumaSum / n;
   const mood = luma < 118 ? "dark" : "light";
 
-  // Hues that straddle a bin edge (e.g. magenta↔red) split their vote, so
-  // score each bin together with its circular neighbours and aggregate the
-  // winning window.
   // A hue family is wide (~75°), so score a ±2-bin window; narrower windows
   // let a compact accent (orange stars) outvote a broad field (hot pink).
   const OFFSETS = [-2, -1, 0, 1, 2];
@@ -192,6 +224,14 @@ async function paletteFrom(buffer) {
         edge: `hsl(${h.toFixed(1)} 40% 13% / 0.09)`,
       };
 }
+
+const NEUTRAL = {
+  mood: "light",
+  dominant: "hsl(0 0% 80%)",
+  bg: "hsl(0 0% 91.5%)",
+  fg: "hsl(0 0% 13%)",
+  edge: "hsl(0 0% 13% / 0.09)",
+};
 
 // ---------------------------------------------------------------------------
 // Open Graph image — the day's block cropped to 1200×630 with a centered
@@ -247,38 +287,45 @@ const esc = (str = "") =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
   );
 
-// ---------------------------------------------------------------------------
+const faviconFor = (colour) =>
+  `data:image/svg+xml,${encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" fill="${colour}"/></svg>`
+  )}`;
 
-function render({ block, date, palette, channel, hasFont }) {
+function dayEntry(date, block, palette) {
   const img = block.image;
   // Resized renditions are re-encoded stills — serve gifs from the original
   // so they keep animating.
   const isGif = img.content_type === "image/gif";
-  const src = isGif ? img.src : img.large?.src ?? img.src;
-  const src2x = isGif ? img.src : img.large?.src_2x ?? img.src;
-  const blockUrl = `https://www.are.na/block/${block.id}`;
+  return {
+    d: date.replaceAll("-", ""),
+    id: block.id,
+    t: block.title || img.filename || "Untitled",
+    by: block.user?.name ?? "unknown",
+    bys: block.user?.slug ?? "",
+    a: relative(block.created_at),
+    m: relative(block.updated_at),
+    w: img.width,
+    h: img.height,
+    src: isGif ? img.src : img.large?.src ?? img.src,
+    bg: palette.bg,
+    fg: palette.fg,
+    e: palette.edge,
+    dm: palette.dominant,
+  };
+}
+
+// ---------------------------------------------------------------------------
+
+function render({ days, channel, hasFont, date }) {
+  const t = days[days.length - 1]; // today
+  const blockUrl = `https://www.are.na/block/${t.id}`;
   const description = `One block a day from ${channel.title}, an Are.na channel by ${channel.owner?.name ?? "its owner"}.`;
   const ogImg = `${SITE_URL}/og.jpg?${date}`;
-  const title = block.title || img.filename || "Untitled";
-  const alt = img.alt_text || title;
-  const favicon = `data:image/svg+xml,${encodeURIComponent(
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" fill="${palette.dominant}"/></svg>`
-  )}`;
-
-  const meta = [
-    { label: null, value: title, href: blockUrl, cls: "title" },
-    { label: "added", value: relative(block.created_at) },
-    { label: "modified", value: relative(block.updated_at) },
-    {
-      label: "by",
-      value: block.user?.name ?? "unknown",
-      href: block.user?.slug ? `https://www.are.na/${block.user.slug}` : undefined,
-    },
-    { label: null, value: `${img.width} × ${img.height}` },
-  ];
+  const daysJson = JSON.stringify(days).replace(/</g, "\\u003c");
 
   return `<!doctype html>
-<html lang="en" data-mood="${palette.mood}">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -291,8 +338,8 @@ function render({ block, date, palette, channel, hasFont }) {
   <meta property="og:image:height" content="630">
 ${SITE_URL ? `  <meta property="og:url" content="${esc(SITE_URL)}">\n` : ""}  <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:image" content="${esc(ogImg)}">
-  <meta name="theme-color" content="${palette.bg}">
-  <link rel="icon" href="${favicon}">
+  <meta name="theme-color" content="${t.bg}">
+  <link rel="icon" id="favicon" href="${faviconFor(t.dm)}">
   <style>
 ${hasFont ? `    @font-face {
       font-family: "Body";
@@ -303,9 +350,9 @@ ${hasFont ? `    @font-face {
     }
 ` : ""}
     :root {
-      --bg: ${palette.bg};
-      --fg: ${palette.fg};
-      --edge: ${palette.edge};
+      --bg: ${t.bg};
+      --fg: ${t.fg};
+      --edge: ${t.e};
     }
 
     *, *::before, *::after { box-sizing: border-box; }
@@ -322,15 +369,84 @@ ${hasFont ? `    @font-face {
       min-height: 100svh;
       display: flex;
       flex-direction: column;
+      transition: background-color 400ms ease, color 400ms ease;
     }
 
     a { color: inherit; text-decoration: none; }
+
+    /* Timeline ruler — one tick per day (thinned when space is tight),
+       day 1 at the left edge, today at the right. */
+    #scrub {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 72px;
+      z-index: 10;
+      cursor: ew-resize;
+      touch-action: none;
+      -webkit-user-select: none;
+      user-select: none;
+      outline: none;
+    }
+
+    #ticks {
+      position: absolute;
+      top: 0;
+      left: 28px;
+      right: 28px;
+      height: 100%;
+    }
+
+    #ticks i {
+      position: absolute;
+      top: 0;
+      width: 1px;
+      height: 13px;
+      margin-left: -0.5px;
+      background: currentColor;
+      opacity: 0.26;
+      transform-origin: top center;
+      animation: tick-in 600ms ease-out backwards;
+    }
+
+    @keyframes tick-in {
+      from { transform: scaleY(0); }
+    }
+
+    #sel-tick {
+      position: absolute;
+      top: 0;
+      width: 1px;
+      height: 30px;
+      margin-left: -0.5px;
+      background: currentColor;
+      opacity: 0.85;
+      transition: left 90ms ease-out;
+    }
+
+    #sel-label {
+      position: absolute;
+      top: 38px;
+      writing-mode: vertical-rl;
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      opacity: 0.5;
+      transform: translateX(-50%);
+      transition: left 90ms ease-out;
+      white-space: nowrap;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      #ticks i { animation: none; }
+      #sel-tick, #sel-label { transition: none; }
+    }
 
     main {
       flex: 1;
       display: grid;
       place-items: center;
-      padding: 48px 24px 24px;
+      padding: 96px 24px 24px;
     }
 
     .block {
@@ -341,10 +457,11 @@ ${hasFont ? `    @font-face {
     .block img {
       display: block;
       max-width: min(88vw, 720px);
-      max-height: 72svh;
+      max-height: 66svh;
       width: auto;
       height: auto;
       box-shadow: 0 0 0 1px var(--edge);
+      transition: opacity 240ms ease;
     }
 
     @keyframes appear {
@@ -354,6 +471,7 @@ ${hasFont ? `    @font-face {
 
     @media (prefers-reduced-motion: reduce) {
       .block { animation: none; }
+      .block img { transition: none; }
     }
 
     footer {
@@ -387,23 +505,181 @@ ${hasFont ? `    @font-face {
   </style>
 </head>
 <body>
+  <nav id="scrub" role="slider" tabindex="0" aria-label="Timeline — one block a day, back to day one"
+       aria-valuemin="0" aria-valuemax="${days.length - 1}" aria-valuenow="${days.length - 1}" aria-valuetext="${t.d}">
+    <div id="ticks"></div>
+    <div id="sel-tick"></div>
+    <div id="sel-label">${t.d}</div>
+  </nav>
   <main>
-    <a class="block" href="${blockUrl}" aria-label="Open this block on Are.na">
-      <img src="${esc(src)}" srcset="${esc(src)} 1x, ${esc(src2x)} 2x"
-           width="${img.width}" height="${img.height}" alt="${esc(alt)}">
+    <a class="block" id="block-link" href="${blockUrl}" aria-label="Open this block on Are.na">
+      <img id="block-img" src="${esc(t.src)}" width="${t.w}" height="${t.h}" alt="${esc(t.t)}">
     </a>
   </main>
   <footer>
-${meta
-  .map(({ label, value, href, cls }) => {
-    const inner = `${label ? `<span class="label">${label}</span>` : ""}${esc(value)}`;
-    return href
-      ? `    <a${cls ? ` class="${cls}"` : ""} href="${esc(href)}" title="${esc(value)}">${inner}</a>`
-      : `    <span>${inner}</span>`;
-  })
-  .join("\n")}
+    <a class="title" id="m-title" href="${blockUrl}" title="${esc(t.t)}">${esc(t.t)}</a>
+    <span><span class="label">added</span><span id="m-added">${esc(t.a)}</span></span>
+    <span><span class="label">modified</span><span id="m-modified">${esc(t.m)}</span></span>
+    <a id="m-by" href="https://www.are.na/${esc(t.bys)}"><span class="label">by</span><span id="m-by-name">${esc(t.by)}</span></a>
+    <span id="m-dims">${t.w} × ${t.h}</span>
   </footer>
-  <!-- ${date} · block ${block.id} · ${palette.mood} · ${palette.dominant} -->
+  <script>
+  (function () {
+    var DAYS = ${daysJson};
+    var N = DAYS.length;
+    var reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    var scrub = document.getElementById("scrub");
+    var ruler = document.getElementById("ticks");
+    var indicator = document.getElementById("sel-tick");
+    var label = document.getElementById("sel-label");
+    var img = document.getElementById("block-img");
+    var link = document.getElementById("block-link");
+    var elTitle = document.getElementById("m-title");
+    var elAdded = document.getElementById("m-added");
+    var elMod = document.getElementById("m-modified");
+    var elBy = document.getElementById("m-by");
+    var elByName = document.getElementById("m-by-name");
+    var elDims = document.getElementById("m-dims");
+    var favicon = document.getElementById("favicon");
+    var rootStyle = document.documentElement.style;
+
+    var sel = N - 1;
+    var ticks = [], idxOf = [], scales = [];
+    var px = -1, hovering = false, dragging = false, raf = 0, loadTimer = 0, resizeTimer = 0;
+
+    function frac(i) { return N === 1 ? 0 : i / (N - 1); }
+
+    function buildTicks() {
+      ruler.textContent = "";
+      ticks = []; idxOf = [];
+      var width = ruler.clientWidth;
+      var step = Math.max(1, Math.ceil(N / Math.max(2, Math.floor(width / 4))));
+      for (var i = 0; i < N; i += step) {
+        var el = document.createElement("i");
+        el.style.left = frac(i) * 100 + "%";
+        el.style.animationDelay = (frac(i) * 400).toFixed(0) + "ms";
+        ruler.appendChild(el);
+        ticks.push(el);
+        idxOf.push(i);
+      }
+      scales = ticks.map(function () { return 1; });
+      place();
+    }
+
+    function place() {
+      var pos = frac(sel) * 100 + "%";
+      indicator.style.left = pos;
+      label.style.left = pos;
+      label.textContent = DAYS[sel].d;
+    }
+
+    function swapImage(day) {
+      var pre = new Image();
+      pre.onload = function () {
+        if (DAYS[sel] !== day) return;
+        img.src = day.src;
+        img.width = day.w;
+        img.height = day.h;
+        img.alt = day.t;
+        img.style.opacity = 1;
+      };
+      pre.src = day.src;
+    }
+
+    function apply(i) {
+      var day = DAYS[i];
+      rootStyle.setProperty("--bg", day.bg);
+      rootStyle.setProperty("--fg", day.fg);
+      rootStyle.setProperty("--edge", day.e);
+      var url = "https://www.are.na/block/" + day.id;
+      link.href = url;
+      elTitle.href = url;
+      elTitle.textContent = day.t;
+      elTitle.title = day.t;
+      elAdded.textContent = day.a;
+      elMod.textContent = day.m;
+      elBy.href = "https://www.are.na/" + day.bys;
+      elByName.textContent = day.by;
+      elDims.textContent = day.w + " \\u00d7 " + day.h;
+      favicon.href = "data:image/svg+xml," + encodeURIComponent(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" fill="' + day.dm + '"/></svg>'
+      );
+      scrub.setAttribute("aria-valuenow", i);
+      scrub.setAttribute("aria-valuetext", day.d);
+      img.style.opacity = 0;
+      clearTimeout(loadTimer);
+      loadTimer = setTimeout(function () { swapImage(day); }, reduced ? 0 : 140);
+    }
+
+    function select(i) {
+      i = Math.max(0, Math.min(N - 1, i));
+      if (i === sel) return;
+      sel = i;
+      place();
+      apply(i);
+    }
+
+    function nearest(clientX) {
+      var r = ruler.getBoundingClientRect();
+      return Math.round((clientX - r.left) / r.width * (N - 1));
+    }
+
+    // The minimap magnify: ticks near the pointer stretch with a gaussian
+    // falloff, easing toward their target height every frame.
+    function loop() {
+      raf = 0;
+      var r = ruler.getBoundingClientRect();
+      var active = false;
+      for (var k = 0; k < ticks.length; k++) {
+        var target = 1;
+        if (hovering && !reduced) {
+          var dx = (r.left + frac(idxOf[k]) * r.width - px) / 32;
+          target = 1 + 1.5 * Math.exp(-dx * dx);
+        }
+        var s = scales[k] + (target - scales[k]) * 0.16;
+        if (Math.abs(target - s) > 0.004) active = true;
+        if (Math.abs(s - scales[k]) > 0.001) {
+          scales[k] = s;
+          ticks[k].style.transform = "scaleY(" + s.toFixed(3) + ")";
+        }
+      }
+      if (active || hovering) raf = requestAnimationFrame(loop);
+    }
+
+    function wake() { if (!raf) raf = requestAnimationFrame(loop); }
+
+    scrub.addEventListener("pointermove", function (e) {
+      px = e.clientX;
+      hovering = true;
+      if (dragging) select(nearest(e.clientX));
+      wake();
+    });
+    scrub.addEventListener("pointerdown", function (e) {
+      dragging = true;
+      px = e.clientX;
+      hovering = true;
+      select(nearest(e.clientX));
+      try { scrub.setPointerCapture(e.pointerId); } catch (err) {}
+      wake();
+      e.preventDefault();
+    });
+    scrub.addEventListener("pointerup", function () { dragging = false; });
+    scrub.addEventListener("pointercancel", function () { dragging = false; hovering = false; wake(); });
+    scrub.addEventListener("pointerleave", function () { if (!dragging) { hovering = false; wake(); } });
+    scrub.addEventListener("keydown", function (e) {
+      if (e.key === "ArrowLeft") { select(sel - 1); e.preventDefault(); }
+      else if (e.key === "ArrowRight") { select(sel + 1); e.preventDefault(); }
+      else if (e.key === "Home") { select(0); e.preventDefault(); }
+      else if (e.key === "End") { select(N - 1); e.preventDefault(); }
+    });
+    addEventListener("resize", function () {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(buildTicks, 150);
+    });
+
+    buildTicks();
+  })();
+  </script>
 </body>
 </html>
 `;
@@ -411,13 +687,42 @@ ${meta
 
 // ---------------------------------------------------------------------------
 
-const { block, date, channel } = await pickBlock();
-const imageUrl = block.image.medium?.src ?? block.image.src;
-const buffer = Buffer.from(await (await fetch(imageUrl)).arrayBuffer());
-const palette = await paletteFrom(buffer);
+const { channel, blocks } = await fetchAllBlocks();
+const dates = datesEndingToday(blocks.length);
+const picks = dates
+  .map((date) => ({ date, block: pickForDate(date, blocks) }))
+  .filter((p) => p.block);
+const todayPick = picks[picks.length - 1];
+
+// Palettes are sampled from the small rendition and cached between builds —
+// only blocks new to the history get downloaded.
+let cache = {};
+try {
+  cache = JSON.parse(await readFile(cacheFile, "utf8"));
+} catch {}
+const uniq = [...new Map(picks.map((p) => [p.block.id, p.block])).values()];
+const missing = uniq.filter((b) => !cache[b.id]);
+if (missing.length) console.log(`sampling ${missing.length} new palettes…`);
+await mapLimit(missing, 8, async (b) => {
+  try {
+    const buf = await fetchBuffer(b.image.small?.src ?? b.image.src);
+    cache[b.id] = await paletteFrom(buf);
+  } catch (err) {
+    console.warn(`palette failed for block ${b.id}: ${err.message}`);
+    cache[b.id] = NEUTRAL;
+  }
+});
+await mkdir(path.dirname(cacheFile), { recursive: true });
+await writeFile(cacheFile, JSON.stringify(cache));
+
+const days = picks.map((p) => dayEntry(p.date, p.block, cache[p.block.id]));
 
 await mkdir(path.join(dist, "assets/fonts"), { recursive: true });
-await ogImage(buffer, path.join(dist, "og.jpg"));
+
+const ogBuffer = await fetchBuffer(
+  todayPick.block.image.medium?.src ?? todayPick.block.image.src
+);
+await ogImage(ogBuffer, path.join(dist, "og.jpg"));
 
 let hasFont = false;
 if (FONT_URL) {
@@ -435,13 +740,14 @@ if (FONT_URL) {
 
 await writeFile(
   path.join(dist, "index.html"),
-  render({ block, date, palette, channel, hasFont })
+  render({ days, channel, hasFont, date: todayPick.date })
 );
 const host = SITE_URL ? new URL(SITE_URL).host : "";
 if (host && !host.endsWith("github.io"))
   await writeFile(path.join(dist, "CNAME"), `${host}\n`);
 await writeFile(path.join(dist, ".nojekyll"), "");
 
+const todayDay = days[days.length - 1];
 console.log(
-  `${date} → block ${block.id} "${block.title}" by ${block.user?.name} · ${palette.mood} · ${palette.dominant}`
+  `${todayPick.date} → block ${todayDay.id} "${todayDay.t}" by ${todayDay.by} · ${cache[todayDay.id].mood} · ${todayDay.dm} · ${days.length} days of history`
 );
