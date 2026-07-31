@@ -96,30 +96,86 @@ const hsl = (h, s, l) => `hsl(${h.toFixed(1)} ${(s * 100).toFixed(1)}% ${(l * 10
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 async function paletteFrom(buffer) {
-  const stats = await sharp(buffer).stats();
-  const { r, g, b } = stats.dominant;
-  const [mr, mg, mb] = stats.channels.map((c) => c.mean);
-  const luma = 0.2126 * mr + 0.7152 * mg + 0.0722 * mb;
+  // Eyedrop the image ourselves: sharp's stats().dominant averages a coarse
+  // histogram and lands on washed-out midtones. Instead, bin every pixel's
+  // hue weighted by its colourfulness (chroma), and take the strongest hue
+  // with its true average saturation.
+  const { data, info } = await sharp(buffer)
+    .resize(96, 96, { fit: "inside" })
+    .removeAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const BINS = 24;
+  const w = new Array(BINS).fill(0);
+  const sx = new Array(BINS).fill(0); // hue as unit vectors, weight-summed
+  const sy = new Array(BINS).fill(0);
+  const ss = new Array(BINS).fill(0);
+  const sr = new Array(BINS).fill(0);
+  const sg = new Array(BINS).fill(0);
+  const sb = new Array(BINS).fill(0);
+  let lumaSum = 0;
+  const n = info.width * info.height;
+
+  for (let i = 0; i < n; i++) {
+    const r = data[i * 3], g = data[i * 3 + 1], b = data[i * 3 + 2];
+    lumaSum += 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    const { h, s, l } = rgbToHsl(r, g, b);
+    const colorfulness = s * (1 - Math.abs(2 * l - 1)); // ≈ chroma
+    if (colorfulness < 0.03) continue;
+    const bin = Math.floor((h / 360) * BINS) % BINS;
+    const rad = (h * Math.PI) / 180;
+    w[bin] += colorfulness;
+    sx[bin] += Math.cos(rad) * colorfulness;
+    sy[bin] += Math.sin(rad) * colorfulness;
+    ss[bin] += s * colorfulness;
+    sr[bin] += r * colorfulness;
+    sg[bin] += g * colorfulness;
+    sb[bin] += b * colorfulness;
+  }
+
+  const luma = lumaSum / n;
   const mood = luma < 118 ? "dark" : "light";
-  const { h, s } = rgbToHsl(r, g, b);
+
+  // Hues that straddle a bin edge (e.g. magenta↔red) split their vote, so
+  // score each bin together with its circular neighbours and aggregate the
+  // winning window.
+  // A hue family is wide (~75°), so score a ±2-bin window; narrower windows
+  // let a compact accent (orange stars) outvote a broad field (hot pink).
+  const OFFSETS = [-2, -1, 0, 1, 2];
+  const score = w.map((_, i) =>
+    OFFSETS.reduce((acc, o) => acc + w[(i + o + BINS) % BINS], 0)
+  );
+  const best = score.indexOf(Math.max(...score));
+  const win = OFFSETS.map((o) => (best + o + BINS) % BINS);
+  const sum = (arr) => win.reduce((acc, i) => acc + arr[i], 0);
+  const wSum = sum(w);
+
+  const colourful = wSum / n > 0.02; // else effectively grayscale
+  const h = colourful
+    ? ((Math.atan2(sum(sy), sum(sx)) * 180) / Math.PI + 360) % 360
+    : 0;
+  const s = colourful ? sum(ss) / wSum : 0;
+  const dominant = colourful
+    ? `rgb(${Math.round(sum(sr) / wSum)} ${Math.round(sum(sg) / wSum)} ${Math.round(sum(sb) / wSum)})`
+    : `hsl(0 0% ${mood === "dark" ? "20%" : "80%"})`;
 
   // Monochromatic, analogous to the dominant colour: same hue throughout,
-  // saturation kept quiet so the tint reads as atmosphere, not colour.
-  const sat = clamp(s, 0.05, 0.22);
+  // a light (or dark) tint that still unmistakably reads as the image.
   return mood === "dark"
     ? {
         mood,
-        dominant: `rgb(${r} ${g} ${b})`,
-        bg: hsl(h, sat, 0.09),
-        fg: hsl(h, clamp(s, 0.03, 0.12), 0.92),
-        edge: `hsl(${h.toFixed(1)} ${(sat * 100).toFixed(1)}% 92% / 0.08)`,
+        dominant,
+        bg: hsl(h, clamp(s * 0.8, 0.12, 0.45), 0.1),
+        fg: hsl(h, clamp(s * 0.4, 0.06, 0.25), 0.92),
+        edge: `hsl(${h.toFixed(1)} 20% 92% / 0.1)`,
       }
     : {
         mood,
-        dominant: `rgb(${r} ${g} ${b})`,
-        bg: hsl(h, sat, 0.955),
-        fg: hsl(h, clamp(s, 0.08, 0.3), 0.13),
-        edge: `hsl(${h.toFixed(1)} ${(sat * 100).toFixed(1)}% 13% / 0.07)`,
+        dominant,
+        bg: hsl(h, clamp(s * 0.9, 0.2, 0.65), 0.915),
+        fg: hsl(h, clamp(s * 0.7, 0.15, 0.5), 0.13),
+        edge: `hsl(${h.toFixed(1)} 40% 13% / 0.09)`,
       };
 }
 
@@ -162,10 +218,14 @@ function render({ block, date, palette }) {
   )}`;
 
   const meta = [
-    { label: null, value: title, href: blockUrl },
+    { label: null, value: title, href: blockUrl, cls: "title" },
     { label: "added", value: relative(block.created_at) },
     { label: "modified", value: relative(block.updated_at) },
-    { label: "by", value: block.user?.name ?? "unknown" },
+    {
+      label: "by",
+      value: block.user?.name ?? "unknown",
+      href: block.user?.slug ? `https://www.are.na/${block.user.slug}` : undefined,
+    },
     { label: null, value: `${img.width} × ${img.height}` },
   ];
 
@@ -284,10 +344,10 @@ function render({ block, date, palette }) {
   </main>
   <footer>
 ${meta
-  .map(({ label, value, href }) => {
+  .map(({ label, value, href, cls }) => {
     const inner = `${label ? `<span class="label">${label}</span>` : ""}${esc(value)}`;
     return href
-      ? `    <a class="title" href="${esc(href)}" title="${esc(value)}">${inner}</a>`
+      ? `    <a${cls ? ` class="${cls}"` : ""} href="${esc(href)}" title="${esc(value)}">${inner}</a>`
       : `    <span>${inner}</span>`;
   })
   .join("\n")}
