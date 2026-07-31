@@ -1,0 +1,11 @@
+{
+  "name": "block",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs"
+  },
+  "dependencies": {
+    "sharp": "^0.34.3"
+  }
+}
