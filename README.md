@@ -32,6 +32,7 @@ gh secret set ARENA_ACCESS_TOKEN
 | `ARENA_CHANNEL` | Your channel's slug — the last part of its URL on are.na | `aesthetic-v0r0rusrlfq` |
 | `SITE_URL` | Where the site will live. Drives the og tags; a non-`github.io` host also writes the `CNAME` file for a custom domain | `https://block.example.com` or `https://you.github.io/block` |
 | `SITE_TZ` | IANA timezone whose midnight flips the day's block | `Europe/London` |
+| `FONT_URL` | Optional — a `.woff2` you have rights to, fetched at build time and self-hosted. Omit for `system-ui` | `https://example.com/font.woff2` |
 
 **5. Enable GitHub Pages.** *Settings → Pages → Source: GitHub Actions.*
 
@@ -55,6 +56,5 @@ All output is static — `dist/` is the whole site.
 
 ## Notes
 
-- **Font:** the type is [Labil Grotesk](https://www.letterboxtype.com) by Letterbox, licensed to Ravi Vasavan — it is *not* covered by this repo's licence. If you fork, swap `assets/fonts/` for a face you have rights to and update the `@font-face` block in `scripts/build.mjs` (the site falls back to `system-ui` cleanly).
 - Only `Image` blocks are shown; text, link, and attachment blocks are skipped.
 - The Are.na API in use is [v3 REST](https://www.are.na/developers/explore).

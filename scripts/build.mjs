@@ -7,7 +7,7 @@
  * page to dist/. Runs daily via GitHub Actions.
  */
 
-import { mkdir, writeFile, copyFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
@@ -21,11 +21,14 @@ import sharp from "sharp";
 //                      for og tags, and a CNAME file is written when it's a
 //                      custom (non-github.io) domain
 //   SITE_TZ            IANA timezone whose midnight flips the day's block
+//   FONT_URL           optional .woff2 URL fetched at build time and
+//                      self-hosted from the site; omit to use system-ui
 const CHANNEL = process.env.ARENA_CHANNEL || "aesthetic-v0r0rusrlfq";
 const API = "https://api.are.na/v3";
 const TOKEN = process.env.ARENA_ACCESS_TOKEN;
 const SITE_URL = (process.env.SITE_URL || "").replace(/\/+$/, "");
 const TZ = process.env.SITE_TZ || "Australia/Melbourne";
+const FONT_URL = process.env.FONT_URL || "";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dist = path.join(root, "dist");
@@ -246,7 +249,7 @@ const esc = (str = "") =>
 
 // ---------------------------------------------------------------------------
 
-function render({ block, date, palette, channel }) {
+function render({ block, date, palette, channel, hasFont }) {
   const img = block.image;
   // Resized renditions are re-encoded stills — serve gifs from the original
   // so they keep animating.
@@ -291,14 +294,14 @@ ${SITE_URL ? `  <meta property="og:url" content="${esc(SITE_URL)}">\n` : ""}  <m
   <meta name="theme-color" content="${palette.bg}">
   <link rel="icon" href="${favicon}">
   <style>
-    @font-face {
-      font-family: "Labil Grotesk";
-      src: url("/assets/fonts/LabilGrotesk-Regular.woff2") format("woff2");
+${hasFont ? `    @font-face {
+      font-family: "Body";
+      src: url("/assets/fonts/body.woff2") format("woff2");
       font-weight: 400;
       font-style: normal;
       font-display: swap;
     }
-
+` : ""}
     :root {
       --bg: ${palette.bg};
       --fg: ${palette.fg};
@@ -313,7 +316,7 @@ ${SITE_URL ? `  <meta property="og:url" content="${esc(SITE_URL)}">\n` : ""}  <m
     body {
       background: var(--bg);
       color: var(--fg);
-      font-family: "Labil Grotesk", system-ui, sans-serif;
+      font-family: ${hasFont ? `"Body", ` : ""}system-ui, sans-serif;
       font-size: 16px;
       line-height: 1.3;
       min-height: 100svh;
@@ -415,13 +418,24 @@ const palette = await paletteFrom(buffer);
 
 await mkdir(path.join(dist, "assets/fonts"), { recursive: true });
 await ogImage(buffer, path.join(dist, "og.jpg"));
-await copyFile(
-  path.join(root, "assets/fonts/LabilGrotesk-Regular.woff2"),
-  path.join(dist, "assets/fonts/LabilGrotesk-Regular.woff2")
-);
+
+let hasFont = false;
+if (FONT_URL) {
+  const res = await fetch(FONT_URL);
+  if (res.ok) {
+    await writeFile(
+      path.join(dist, "assets/fonts/body.woff2"),
+      Buffer.from(await res.arrayBuffer())
+    );
+    hasFont = true;
+  } else {
+    console.warn(`font fetch failed (${res.status}) — falling back to system-ui`);
+  }
+}
+
 await writeFile(
   path.join(dist, "index.html"),
-  render({ block, date, palette, channel })
+  render({ block, date, palette, channel, hasFont })
 );
 const host = SITE_URL ? new URL(SITE_URL).host : "";
 if (host && !host.endsWith("github.io"))
