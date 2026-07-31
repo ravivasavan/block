@@ -32,6 +32,7 @@ gh secret set ARENA_ACCESS_TOKEN
 | `ARENA_CHANNEL` | Your channel's slug — the last part of its URL on are.na | `aesthetic-v0r0rusrlfq` |
 | `SITE_URL` | Where the site will live. Drives the og tags; a non-`github.io` host also writes the `CNAME` file for a custom domain | `https://block.example.com` or `https://you.github.io/block` |
 | `SITE_TZ` | IANA timezone whose midnight flips the day's block | `Europe/London` |
+| `SITE_EPOCH` | Optional — launch date. History accumulates one day at a time from here (launch day shows a single block) until it reaches the channel's block count. Omit for full depth immediately | `2026-07-31` |
 | `FONT_URL` | Optional — a `.woff2` you have rights to, fetched at build time and self-hosted. Omit for `system-ui` | `https://example.com/font.woff2` |
 
 **5. Enable GitHub Pages.** *Settings → Pages → Source: GitHub Actions.*

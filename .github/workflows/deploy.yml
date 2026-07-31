@@ -42,6 +42,7 @@ jobs:
           ARENA_CHANNEL: ${{ vars.ARENA_CHANNEL }}
           SITE_URL: ${{ vars.SITE_URL }}
           SITE_TZ: ${{ vars.SITE_TZ }}
+          SITE_EPOCH: ${{ vars.SITE_EPOCH }}
           FONT_URL: ${{ vars.FONT_URL }}
       - uses: actions/upload-pages-artifact@v3
         with:

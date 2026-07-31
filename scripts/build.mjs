@@ -23,6 +23,10 @@ import sharp from "sharp";
 //                      for og tags, and a CNAME file is written when it's a
 //                      custom (non-github.io) domain
 //   SITE_TZ            IANA timezone whose midnight flips the day's block
+//   SITE_EPOCH         YYYY-MM-DD the site launched. History accumulates one
+//                      day at a time from this date (launch day shows a
+//                      single block) until it reaches the channel's block
+//                      count. Omit for full-depth history immediately.
 //   FONT_URL           optional .woff2 URL fetched at build time and
 //                      self-hosted from the site; omit to use system-ui
 const CHANNEL = process.env.ARENA_CHANNEL || "aesthetic-v0r0rusrlfq";
@@ -30,6 +34,7 @@ const API = "https://api.are.na/v3";
 const TOKEN = process.env.ARENA_ACCESS_TOKEN;
 const SITE_URL = (process.env.SITE_URL || "").replace(/\/+$/, "");
 const TZ = process.env.SITE_TZ || "Australia/Melbourne";
+const EPOCH = process.env.SITE_EPOCH || "";
 const FONT_URL = process.env.FONT_URL || "";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -374,8 +379,10 @@ ${hasFont ? `    @font-face {
 
     a { color: inherit; text-decoration: none; }
 
-    /* Timeline ruler — one tick per day (thinned when space is tight),
-       day 1 at the left edge, today at the right. */
+    /* Timeline ruler — one tick per day at a fixed 8px pitch, day 1 first,
+       today last. The strip is wider than the viewport and pans under the
+       pointer faster than the pointer moves (parallax), so the whole
+       history is always reachable. */
     #scrub {
       position: fixed;
       top: 0;
@@ -390,12 +397,20 @@ ${hasFont ? `    @font-face {
       outline: none;
     }
 
+    /* The strip is wider than the viewport — clip it without clipping the
+       date label, which hangs below the scrub zone. */
+    #clip {
+      position: absolute;
+      inset: 0;
+      overflow: hidden;
+    }
+
     #ticks {
       position: absolute;
       top: 0;
-      left: 28px;
-      right: 28px;
+      left: 0;
       height: 100%;
+      will-change: transform;
     }
 
     #ticks i {
@@ -403,7 +418,6 @@ ${hasFont ? `    @font-face {
       top: 0;
       width: 1px;
       height: 13px;
-      margin-left: -0.5px;
       background: currentColor;
       opacity: 0.26;
       transform-origin: top center;
@@ -417,29 +431,28 @@ ${hasFont ? `    @font-face {
     #sel-tick {
       position: absolute;
       top: 0;
+      left: 0;
       width: 1px;
       height: 30px;
-      margin-left: -0.5px;
       background: currentColor;
       opacity: 0.85;
-      transition: left 90ms ease-out;
+      will-change: transform;
     }
 
     #sel-label {
       position: absolute;
       top: 38px;
+      left: 0;
       writing-mode: vertical-rl;
       font-size: 11px;
       letter-spacing: 0.1em;
       opacity: 0.5;
-      transform: translateX(-50%);
-      transition: left 90ms ease-out;
       white-space: nowrap;
+      will-change: transform;
     }
 
     @media (prefers-reduced-motion: reduce) {
       #ticks i { animation: none; }
-      #sel-tick, #sel-label { transition: none; }
     }
 
     main {
@@ -507,7 +520,7 @@ ${hasFont ? `    @font-face {
 <body>
   <nav id="scrub" role="slider" tabindex="0" aria-label="Timeline — one block a day, back to day one"
        aria-valuemin="0" aria-valuemax="${days.length - 1}" aria-valuenow="${days.length - 1}" aria-valuetext="${t.d}">
-    <div id="ticks"></div>
+    <div id="clip"><div id="ticks"></div></div>
     <div id="sel-tick"></div>
     <div id="sel-label">${t.d}</div>
   </nav>
@@ -543,34 +556,63 @@ ${hasFont ? `    @font-face {
     var favicon = document.getElementById("favicon");
     var rootStyle = document.documentElement.style;
 
+    var SPACING = 8;   // ticks sit on a fixed 8px pitch
+    var INSET = 28;
+
     var sel = N - 1;
-    var ticks = [], idxOf = [], scales = [];
+    var ticks = [], scales = [];
+    var stripX = 0, stripTarget = 0;
     var px = -1, hovering = false, dragging = false, raf = 0, loadTimer = 0, resizeTimer = 0;
 
     function frac(i) { return N === 1 ? 0 : i / (N - 1); }
+    function clamp01(v) { return Math.max(0, Math.min(1, v)); }
+    function usable() { return Math.max(1, scrub.clientWidth - INSET * 2); }
+    function overflow() { return (N - 1) * SPACING > usable(); }
+
+    // Where the strip rests when the pointer is away: the selected tick at
+    // its proportional spot in the viewport (or simply left-anchored while
+    // the strip still fits).
+    function restX() {
+      if (!overflow()) return INSET;
+      return INSET + frac(sel) * usable() - sel * SPACING;
+    }
+
+    // Pan target while the pointer is at x: the pointer's fraction of the
+    // viewport maps to the full history, so the strip slides past faster
+    // than the pointer moves — the day under the pointer is the day you get.
+    function panFor(x) {
+      if (!overflow()) return INSET;
+      return x - clamp01((x - INSET) / usable()) * (N - 1) * SPACING;
+    }
+
+    function dayAt(x) {
+      if (!overflow())
+        return Math.max(0, Math.min(N - 1, Math.round((x - INSET) / SPACING)));
+      return Math.round(clamp01((x - INSET) / usable()) * (N - 1));
+    }
 
     function buildTicks() {
       ruler.textContent = "";
-      ticks = []; idxOf = [];
-      var width = ruler.clientWidth;
-      var step = Math.max(1, Math.ceil(N / Math.max(2, Math.floor(width / 4))));
-      for (var i = 0; i < N; i += step) {
+      ticks = [];
+      ruler.style.width = ((N - 1) * SPACING + 1) + "px";
+      for (var i = 0; i < N; i++) {
         var el = document.createElement("i");
-        el.style.left = frac(i) * 100 + "%";
+        el.style.left = i * SPACING + "px";
         el.style.animationDelay = (frac(i) * 400).toFixed(0) + "ms";
         ruler.appendChild(el);
         ticks.push(el);
-        idxOf.push(i);
       }
       scales = ticks.map(function () { return 1; });
-      place();
+      stripX = stripTarget = restX();
+      label.textContent = DAYS[sel].d;
+      paint();
     }
 
-    function place() {
-      var pos = frac(sel) * 100 + "%";
-      indicator.style.left = pos;
-      label.style.left = pos;
-      label.textContent = DAYS[sel].d;
+    function paint() {
+      ruler.style.transform = "translateX(" + stripX.toFixed(2) + "px)";
+      var x = (stripX + sel * SPACING).toFixed(2);
+      indicator.style.transform = "translateX(" + x + "px)";
+      label.style.transform = "translateX(" + x + "px) translateX(-50%)";
     }
 
     function swapImage(day) {
@@ -615,25 +657,26 @@ ${hasFont ? `    @font-face {
       i = Math.max(0, Math.min(N - 1, i));
       if (i === sel) return;
       sel = i;
-      place();
+      label.textContent = DAYS[sel].d;
       apply(i);
+      if (!hovering) stripTarget = restX();
     }
 
-    function nearest(clientX) {
-      var r = ruler.getBoundingClientRect();
-      return Math.round((clientX - r.left) / r.width * (N - 1));
-    }
-
-    // The minimap magnify: ticks near the pointer stretch with a gaussian
-    // falloff, easing toward their target height every frame.
+    // Every frame: glide the strip toward its target (the parallax), and
+    // stretch ticks near the pointer with a gaussian falloff (the magnify).
     function loop() {
       raf = 0;
-      var r = ruler.getBoundingClientRect();
       var active = false;
+
+      var nx = stripX + (stripTarget - stripX) * (reduced ? 1 : 0.16);
+      if (Math.abs(stripTarget - nx) > 0.1) active = true;
+      else nx = stripTarget;
+      stripX = nx;
+
       for (var k = 0; k < ticks.length; k++) {
         var target = 1;
         if (hovering && !reduced) {
-          var dx = (r.left + frac(idxOf[k]) * r.width - px) / 32;
+          var dx = (stripX + k * SPACING - px) / 32;
           target = 1 + 1.5 * Math.exp(-dx * dx);
         }
         var s = scales[k] + (target - scales[k]) * 0.16;
@@ -643,6 +686,8 @@ ${hasFont ? `    @font-face {
           ticks[k].style.transform = "scaleY(" + s.toFixed(3) + ")";
         }
       }
+
+      paint();
       if (active || hovering) raf = requestAnimationFrame(loop);
     }
 
@@ -651,21 +696,23 @@ ${hasFont ? `    @font-face {
     scrub.addEventListener("pointermove", function (e) {
       px = e.clientX;
       hovering = true;
-      if (dragging) select(nearest(e.clientX));
+      stripTarget = panFor(e.clientX);
+      if (dragging) select(dayAt(e.clientX));
       wake();
     });
     scrub.addEventListener("pointerdown", function (e) {
       dragging = true;
       px = e.clientX;
       hovering = true;
-      select(nearest(e.clientX));
+      stripTarget = panFor(e.clientX);
+      select(dayAt(e.clientX));
       try { scrub.setPointerCapture(e.pointerId); } catch (err) {}
       wake();
       e.preventDefault();
     });
     scrub.addEventListener("pointerup", function () { dragging = false; });
-    scrub.addEventListener("pointercancel", function () { dragging = false; hovering = false; wake(); });
-    scrub.addEventListener("pointerleave", function () { if (!dragging) { hovering = false; wake(); } });
+    scrub.addEventListener("pointercancel", function () { dragging = false; hovering = false; stripTarget = restX(); wake(); });
+    scrub.addEventListener("pointerleave", function () { if (!dragging) { hovering = false; stripTarget = restX(); wake(); } });
     scrub.addEventListener("keydown", function (e) {
       if (e.key === "ArrowLeft") { select(sel - 1); e.preventDefault(); }
       else if (e.key === "ArrowRight") { select(sel + 1); e.preventDefault(); }
@@ -674,7 +721,11 @@ ${hasFont ? `    @font-face {
     });
     addEventListener("resize", function () {
       clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(buildTicks, 150);
+      resizeTimer = setTimeout(function () {
+        stripX = stripTarget = restX();
+        paint();
+        wake();
+      }, 150);
     });
 
     buildTicks();
@@ -687,8 +738,21 @@ ${hasFont ? `    @font-face {
 
 // ---------------------------------------------------------------------------
 
+const dayMs = 86400000;
+const utcOf = (ymd) => {
+  const [y, m, d] = ymd.split("-").map(Number);
+  return Date.UTC(y, m - 1, d);
+};
+
 const { channel, blocks } = await fetchAllBlocks();
-const dates = datesEndingToday(blocks.length);
+// History depth: everything, or — with an epoch — one day per day since
+// launch, capped at the channel's block count.
+let depth = blocks.length;
+if (EPOCH) {
+  const elapsed = Math.floor((utcOf(today()) - utcOf(EPOCH)) / dayMs) + 1;
+  depth = Math.min(depth, Math.max(1, elapsed));
+}
+const dates = datesEndingToday(depth);
 const picks = dates
   .map((date) => ({ date, block: pickForDate(date, blocks) }))
   .filter((p) => p.block);
