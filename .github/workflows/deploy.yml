@@ -4,8 +4,9 @@ on:
   push:
     branches: [main]
   schedule:
-    # 14:05 UTC — just past midnight in Melbourne year-round (AEST/AEDT),
-    # so the day's block flips with the local date.
+    # Just past midnight in SITE_TZ (default Australia/Melbourne), so the
+    # day's block flips with the local date. If you fork this with a
+    # different SITE_TZ, adjust this to shortly after your midnight in UTC.
     - cron: "5 14 * * *"
   workflow_dispatch:
 
@@ -31,6 +32,9 @@ jobs:
       - run: npm run build
         env:
           ARENA_ACCESS_TOKEN: ${{ secrets.ARENA_ACCESS_TOKEN }}
+          ARENA_CHANNEL: ${{ vars.ARENA_CHANNEL }}
+          SITE_URL: ${{ vars.SITE_URL }}
+          SITE_TZ: ${{ vars.SITE_TZ }}
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist

@@ -12,10 +12,20 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
 
-const CHANNEL = "aesthetic-v0r0rusrlfq";
+// Configuration — all via environment so forks never edit code:
+//   ARENA_CHANNEL      Are.na channel slug (the bit after are.na/<user>/…)
+//   ARENA_ACCESS_TOKEN personal access token from dev.are.na (only needed
+//                      for private channels; public/closed channels work
+//                      without one)
+//   SITE_URL           canonical URL, e.g. https://block.example.com — used
+//                      for og tags, and a CNAME file is written when it's a
+//                      custom (non-github.io) domain
+//   SITE_TZ            IANA timezone whose midnight flips the day's block
+const CHANNEL = process.env.ARENA_CHANNEL || "aesthetic-v0r0rusrlfq";
 const API = "https://api.are.na/v3";
 const TOKEN = process.env.ARENA_ACCESS_TOKEN;
-const DOMAIN = "block.ravivasavan.com";
+const SITE_URL = (process.env.SITE_URL || "").replace(/\/+$/, "");
+const TZ = process.env.SITE_TZ || "Australia/Melbourne";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dist = path.join(root, "dist");
@@ -30,11 +40,11 @@ async function api(url) {
 
 // ---------------------------------------------------------------------------
 // Pick of the day — FNV-1a over the local date so the choice is stable for
-// the whole day and changes at Melbourne midnight.
+// the whole day and changes at local midnight.
 
-function todayInMelbourne() {
+function today() {
   return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Australia/Melbourne",
+    timeZone: TZ,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -55,7 +65,7 @@ async function pickBlock() {
   const total = channel.counts.contents;
   if (!total) throw new Error("Channel is empty");
 
-  const date = todayInMelbourne();
+  const date = today();
   let index = fnv1a(date) % total;
 
   // Walk forward (wrapping) until we land on an image block.
@@ -65,7 +75,8 @@ async function pickBlock() {
       `${API}/channels/${CHANNEL}/contents?per=1&page=${page}`
     );
     const block = data?.[0];
-    if (block?.type === "Image" && block.image?.src) return { block, date };
+    if (block?.type === "Image" && block.image?.src)
+      return { block, date, channel };
     index++;
   }
   throw new Error("No image block found near today's index");
@@ -235,7 +246,7 @@ const esc = (str = "") =>
 
 // ---------------------------------------------------------------------------
 
-function render({ block, date, palette }) {
+function render({ block, date, palette, channel }) {
   const img = block.image;
   // Resized renditions are re-encoded stills — serve gifs from the original
   // so they keep animating.
@@ -243,6 +254,8 @@ function render({ block, date, palette }) {
   const src = isGif ? img.src : img.large?.src ?? img.src;
   const src2x = isGif ? img.src : img.large?.src_2x ?? img.src;
   const blockUrl = `https://www.are.na/block/${block.id}`;
+  const description = `One block a day from ${channel.title}, an Are.na channel by ${channel.owner?.name ?? "its owner"}.`;
+  const ogImg = `${SITE_URL}/og.jpg?${date}`;
   const title = block.title || img.filename || "Untitled";
   const alt = img.alt_text || title;
   const favicon = `data:image/svg+xml,${encodeURIComponent(
@@ -267,15 +280,14 @@ function render({ block, date, palette }) {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>block</title>
-  <meta name="description" content="One block a day from Aesthetic — an Are.na channel by Ravi Vasavan.">
+  <meta name="description" content="${esc(description)}">
   <meta property="og:title" content="block">
-  <meta property="og:description" content="One block a day from Aesthetic — an Are.na channel by Ravi Vasavan.">
-  <meta property="og:image" content="https://${DOMAIN}/og.jpg?${date}">
+  <meta property="og:description" content="${esc(description)}">
+  <meta property="og:image" content="${esc(ogImg)}">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:url" content="https://${DOMAIN}">
-  <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:image" content="https://${DOMAIN}/og.jpg?${date}">
+${SITE_URL ? `  <meta property="og:url" content="${esc(SITE_URL)}">\n` : ""}  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="${esc(ogImg)}">
   <meta name="theme-color" content="${palette.bg}">
   <link rel="icon" href="${favicon}">
   <style>
@@ -396,7 +408,7 @@ ${meta
 
 // ---------------------------------------------------------------------------
 
-const { block, date } = await pickBlock();
+const { block, date, channel } = await pickBlock();
 const imageUrl = block.image.medium?.src ?? block.image.src;
 const buffer = Buffer.from(await (await fetch(imageUrl)).arrayBuffer());
 const palette = await paletteFrom(buffer);
@@ -407,8 +419,13 @@ await copyFile(
   path.join(root, "assets/fonts/LabilGrotesk-Regular.woff2"),
   path.join(dist, "assets/fonts/LabilGrotesk-Regular.woff2")
 );
-await writeFile(path.join(dist, "index.html"), render({ block, date, palette }));
-await writeFile(path.join(dist, "CNAME"), `${DOMAIN}\n`);
+await writeFile(
+  path.join(dist, "index.html"),
+  render({ block, date, palette, channel })
+);
+const host = SITE_URL ? new URL(SITE_URL).host : "";
+if (host && !host.endsWith("github.io"))
+  await writeFile(path.join(dist, "CNAME"), `${host}\n`);
 await writeFile(path.join(dist, ".nojekyll"), "");
 
 console.log(
