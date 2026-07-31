@@ -180,6 +180,38 @@ async function paletteFrom(buffer) {
 }
 
 // ---------------------------------------------------------------------------
+// Open Graph image — the day's block cropped to 1200×630 with a centered
+// square (the block) at half height, white or black by what's underneath it.
+
+async function ogImage(buffer, outPath) {
+  const W = 1200, H = 630;
+  const side = Math.round(H * 0.5);
+  const x = Math.round((W - side) / 2);
+  const y = Math.round((H - side) / 2);
+
+  const base = await sharp(buffer)
+    .resize(W, H, { fit: "cover" })
+    .removeAlpha()
+    .toBuffer();
+
+  const under = await sharp(base)
+    .extract({ left: x, top: y, width: side, height: side })
+    .stats();
+  const [r, g, b] = under.channels.map((c) => c.mean);
+  const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  const fill = luma < 128 ? "#ffffff" : "#000000";
+
+  const square = Buffer.from(
+    `<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg"><rect x="${x}" y="${y}" width="${side}" height="${side}" fill="${fill}"/></svg>`
+  );
+  await sharp(base)
+    .composite([{ input: square }])
+    .jpeg({ quality: 88 })
+    .toFile(outPath);
+  return fill;
+}
+
+// ---------------------------------------------------------------------------
 // Relative time, in Are.na's voice ("over 1 year ago", "2 minutes ago").
 
 function relative(iso) {
@@ -238,8 +270,12 @@ function render({ block, date, palette }) {
   <meta name="description" content="One block a day from Aesthetic — an Are.na channel by Ravi Vasavan.">
   <meta property="og:title" content="block">
   <meta property="og:description" content="One block a day from Aesthetic — an Are.na channel by Ravi Vasavan.">
-  <meta property="og:image" content="${esc(img.medium?.src ?? src)}">
+  <meta property="og:image" content="https://${DOMAIN}/og.jpg?${date}">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
   <meta property="og:url" content="https://${DOMAIN}">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://${DOMAIN}/og.jpg?${date}">
   <meta name="theme-color" content="${palette.bg}">
   <link rel="icon" href="${favicon}">
   <style>
@@ -366,6 +402,7 @@ const buffer = Buffer.from(await (await fetch(imageUrl)).arrayBuffer());
 const palette = await paletteFrom(buffer);
 
 await mkdir(path.join(dist, "assets/fonts"), { recursive: true });
+await ogImage(buffer, path.join(dist, "og.jpg"));
 await copyFile(
   path.join(root, "assets/fonts/LabilGrotesk-Regular.woff2"),
   path.join(dist, "assets/fonts/LabilGrotesk-Regular.woff2")
