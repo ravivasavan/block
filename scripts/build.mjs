@@ -487,11 +487,17 @@ ${hasFont ? `    @font-face {
       .block img { transition: none; }
     }
 
+    /* Five equal columns, not space-between: each field's width came from its
+       own content, so scrubbing days shuffled the whole row sideways — a new
+       title length moved "added", "by" and the dimensions with it. Fixed
+       columns hold every field still while the day changes underneath. The
+       title pays for it (Are.na falls back to the upload's filename, which
+       can be long) and truncates at its column edge — the full string stays
+       in its title attribute. */
     footer {
-      display: flex;
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
       align-items: baseline;
-      justify-content: space-between;
-      flex-wrap: wrap;
       gap: 8px 24px;
       padding: 20px 24px;
       font-size: 13px;
@@ -502,18 +508,33 @@ ${hasFont ? `    @font-face {
 
     footer:hover { opacity: 0.85; }
 
-    footer .title {
+    /* Grid blockifies these, so text-overflow applies; minmax(0, 1fr) above
+       is what lets a column shrink below its content instead of pushing the
+       row wider than the viewport. */
+    footer > * {
+      min-width: 0;
       overflow: hidden;
       text-overflow: ellipsis;
-      max-width: 38ch;
     }
+
+    /* Equal columns leave the row short of the right edge, since content sits
+       at the start of its cell. Anchoring the last one keeps the metadata
+       spanning the footer the way space-between did. */
+    footer > :last-child { text-align: right; }
 
     footer a:hover { text-decoration: underline; }
 
     footer .label { opacity: 0.6; margin-right: 0.35em; }
 
-    @media (max-width: 560px) {
-      footer { justify-content: flex-start; }
+    /* Five columns squeeze the relative times ("about 2 hours ago") to
+       nothing well before the layout folds — drop to two, with the title
+       across the top. Still equal, still stable. Two columns already reach
+       the right edge, and right-aligning there would only break the
+       dimensions out of line with "modified" above it. */
+    @media (max-width: 900px) {
+      footer { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      footer .title { grid-column: 1 / -1; }
+      footer > :last-child { text-align: left; }
     }
   </style>
 </head>
