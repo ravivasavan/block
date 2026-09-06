@@ -3,10 +3,11 @@
  *
  * Fetches the channel via Are.na's v3 REST API and picks one image block per
  * day, deterministically from the date. The channel's block count sets the
- * depth of history: N blocks → N days, scrubbable via the timeline ruler at
- * the top edge. Each day's dominant colour and mood (light/dark) are sampled
- * at build time (cached in .cache/ between runs) and the whole history is
- * baked into a fully static page in dist/. Runs daily via GitHub Actions.
+ * depth of history: N blocks → N days, scrubbable via the timeline ruler on
+ * the pane of glass floating above the block. Each day's dominant colour and
+ * mood (light/dark) are sampled at build time (cached in .cache/ between runs)
+ * and the whole history is baked into a fully static page in dist/. Runs daily
+ * via GitHub Actions.
  */
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -322,19 +323,74 @@ function dayEntry(date, block, palette) {
 
 // ---------------------------------------------------------------------------
 
-function render({ days, channel, hasFont, date }) {
+// A day's mood is already written into its palette: light backgrounds land at
+// l=91.5%, dark ones at l=10%. Reading it back off the baked hsl() keeps the
+// DAYS payload exactly as it has always been.
+const moodOfBg = (bg) =>
+  parseFloat(/([\d.]+)%\s*\)$/.exec(bg)?.[1] ?? "100") < 50 ? "dark" : "light";
+
+// Are.na renders every image at three caps — 400 / 1200 / 1800 on the long
+// edge, doubled for the @2x variants. It reports each rendition at the size
+// the cap implies, but resizes `withoutEnlargement`, so a 540px-wide original
+// is served at 540 from every cap above it: clamp each candidate to the
+// original's width and dedupe. Where several caps collide on one width the
+// last write wins, so the @2x URL goes in first and the widest 1x rendition
+// comes out on top — the same URL dayEntry already chose for `src`. Gifs get
+// nothing — their renditions are re-encoded stills (see dayEntry).
+function renditionsOf(img) {
+  if (!img || img.content_type === "image/gif") return [];
+  const cap = img.width || Infinity;
+  const byWidth = new Map();
+  for (const name of ["small", "medium", "large"]) {
+    const r = img[name];
+    if (!r?.src || !r.width) continue;
+    if (r.src_2x) byWidth.set(Math.min(cap, r.width * 2), r.src_2x);
+    byWidth.set(Math.min(cap, r.width), r.src);
+  }
+  return [...byWidth]
+    .filter(([w]) => Number.isFinite(w) && w > 0)
+    .sort((a, b) => a[0] - b[0])
+    .map(([w, src]) => ({ w, src }));
+}
+
+const originOf = (url) => {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return "";
+  }
+};
+
+function render({ days, channel, hasFont, date, heroImage }) {
   const t = days[days.length - 1]; // today
   const blockUrl = `https://www.are.na/block/${t.id}`;
   const description = `One block a day from ${channel.title}, an Are.na channel by ${channel.owner?.name ?? "its owner"}.`;
   const ogImg = `${SITE_URL}/og.jpg?${date}`;
   const daysJson = JSON.stringify(days).replace(/</g, "\\u003c");
 
+  // Today's block is the LCP: preconnect to wherever it comes from, preload it
+  // with the same candidate set the <img> will choose from, and mirror the
+  // img's own box in `sizes` — both caps, not just the width one. Anything
+  // taller than ~1.2:1 is bound by `max-height: 66svh` instead, and quoting
+  // 720px for it makes the browser fetch a rendition it will never draw. The
+  // height cap collapses into a plain viewport length — 66svh of height on a
+  // w:h block is 66 × w/h of width — so `sizes` stays three flat terms.
+  const renditions = renditionsOf(heroImage);
+  const srcset = renditions.map((r) => `${esc(r.src)} ${r.w}w`).join(", ");
+  const heightCap = t.w > 0 && t.h > 0 ? +((66 * t.w) / t.h).toFixed(3) : null;
+  const sizes = heightCap
+    ? `min(88vw, 720px, ${heightCap}svh)`
+    : "min(88vw, 720px)";
+  const origins = [
+    ...new Set([t.src, ...renditions.map((r) => r.src)].map(originOf)),
+  ].filter(Boolean);
+
   return `<!doctype html>
-<html lang="en">
+<html lang="en" data-mood="${moodOfBg(t.bg)}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>block</title>
+${origins.map((o) => `  <link rel="preconnect" href="${esc(o)}">\n  <link rel="dns-prefetch" href="${esc(o)}">\n`).join("")}  <title>block</title>
   <meta name="description" content="${esc(description)}">
   <meta property="og:title" content="block">
   <meta property="og:description" content="${esc(description)}">
@@ -343,9 +399,10 @@ function render({ days, channel, hasFont, date }) {
   <meta property="og:image:height" content="630">
 ${SITE_URL ? `  <meta property="og:url" content="${esc(SITE_URL)}">\n` : ""}  <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:image" content="${esc(ogImg)}">
-  <meta name="theme-color" content="${t.bg}">
-  <link rel="icon" id="favicon" href="${faviconFor(t.dm)}">
-  <style>
+  <meta name="theme-color" id="theme-color" content="${t.bg}">
+${SITE_URL ? `  <link rel="canonical" href="${esc(SITE_URL)}/">\n` : ""}  <link rel="icon" id="favicon" href="${faviconFor(t.dm)}">
+  <link rel="preload" as="image" fetchpriority="high" href="${esc(t.src)}"${srcset ? `\n        imagesrcset="${srcset}" imagesizes="${sizes}"` : ""}>
+${hasFont ? `  <link rel="preload" href="/assets/fonts/body.woff2" as="font" type="font/woff2" crossorigin>\n` : ""}  <style>
 ${hasFont ? `    @font-face {
       font-family: "Body";
       src: url("/assets/fonts/body.woff2") format("woff2");
@@ -358,6 +415,23 @@ ${hasFont ? `    @font-face {
       --bg: ${t.bg};
       --fg: ${t.fg};
       --edge: ${t.e};
+
+      /* Liquid glass — the same material the rest of the sites use, mixed
+         from the day's own palette so the strip belongs to the image it
+         floats over. */
+      --glass-bg: color-mix(in srgb, var(--bg) 62%, transparent);
+      --glass-blur: blur(24px) saturate(160%);
+      --glass-edge: inset 0 0 0 1px color-mix(in srgb, var(--fg) 10%, transparent);
+      --glass-specular: inset 0 1px 0 color-mix(in srgb, white 45%, transparent);
+      --glass-shadow: 0 1px 2px rgba(13, 27, 30, 0.06), 0 24px 64px rgba(13, 27, 30, 0.18);
+      --glass-radius: 24px;
+    }
+
+    /* Dark days: thinner tint so the image still reads through, and a
+       specular edge that isn't a white line across a black page. */
+    :root[data-mood="dark"] {
+      --glass-bg: color-mix(in srgb, var(--bg) 52%, transparent);
+      --glass-specular: inset 0 1px 0 color-mix(in srgb, white 12%, transparent);
     }
 
     *, *::before, *::after { box-sizing: border-box; }
@@ -382,27 +456,47 @@ ${hasFont ? `    @font-face {
     /* Timeline ruler — one tick per day at a fixed 8px pitch, day 1 first,
        today last. The strip is wider than the viewport and pans under the
        pointer faster than the pointer moves (parallax), so the whole
-       history is always reachable. */
+       history is always reachable. It is this page's only control, so it
+       rides on its own pane of glass above the block rather than sitting
+       flat on the page. */
     #scrub {
       position: fixed;
-      top: 0;
-      left: 0;
-      right: 0;
-      height: 72px;
+      top: 12px;
+      left: 12px;
+      right: 12px;
+      height: 56px;
       z-index: 10;
+      border-radius: var(--glass-radius);
+      background: var(--glass-bg);
+      -webkit-backdrop-filter: var(--glass-blur);
+      backdrop-filter: var(--glass-blur);
+      box-shadow: var(--glass-edge), var(--glass-specular), var(--glass-shadow);
       cursor: ew-resize;
       touch-action: none;
       -webkit-user-select: none;
       user-select: none;
       outline: none;
+      transition: background-color 400ms ease;
     }
 
-    /* The strip is wider than the viewport — clip it without clipping the
-       date label, which hangs below the scrub zone. */
+    @media (min-width: 900px) {
+      #scrub { top: 16px; left: 16px; right: 16px; }
+    }
+
+    /* The zone loses its outline to the glass, so put the focus ring on the
+       pane itself, outside the three shadows that build the material. */
+    #scrub:focus-visible {
+      box-shadow: var(--glass-edge), var(--glass-specular), var(--glass-shadow),
+                  0 0 0 2px color-mix(in srgb, var(--fg) 45%, transparent);
+    }
+
+    /* The ruler is wider than the pane — clip it to the pane's rounded box
+       without clipping the date label, which hangs below the glass. */
     #clip {
       position: absolute;
       inset: 0;
       overflow: hidden;
+      border-radius: inherit;
     }
 
     #ticks {
@@ -413,14 +507,16 @@ ${hasFont ? `    @font-face {
       will-change: transform;
     }
 
+    /* Centred in the pane and magnified about their middle, so a tick under
+       the pointer grows into the glass in both directions. */
     #ticks i {
       position: absolute;
-      top: 0;
+      top: calc(50% - 6.5px);
       width: 1px;
       height: 13px;
       background: currentColor;
       opacity: 0.26;
-      transform-origin: top center;
+      transform-origin: center;
       animation: tick-in 600ms ease-out backwards;
     }
 
@@ -433,28 +529,42 @@ ${hasFont ? `    @font-face {
       top: 0;
       left: 0;
       width: 1px;
-      height: 30px;
+      height: 100%;
       background: currentColor;
       opacity: 0.85;
+      pointer-events: none;
       will-change: transform;
     }
 
     #sel-label {
       position: absolute;
-      top: 38px;
+      top: calc(100% + 10px);
       left: 0;
       writing-mode: vertical-rl;
       font-size: 11px;
       letter-spacing: 0.1em;
       opacity: 0.5;
       white-space: nowrap;
+      pointer-events: none;
       will-change: transform;
     }
 
     @media (prefers-reduced-motion: reduce) {
       #ticks i { animation: none; }
+      #scrub { transition: none; }
     }
 
+    /* No blur to sample through: fall back to a near-solid pane. */
+    @media (prefers-reduced-transparency: reduce) {
+      #scrub {
+        background: color-mix(in srgb, var(--bg) 96%, transparent);
+        -webkit-backdrop-filter: none;
+        backdrop-filter: none;
+      }
+    }
+
+    /* The top padding clears the floating strip (16 + 56 at its lowest) with
+       room to spare, so the block never slides under the glass. */
     main {
       flex: 1;
       display: grid;
@@ -493,7 +603,13 @@ ${hasFont ? `    @font-face {
        columns hold every field still while the day changes underneath. The
        title pays for it (Are.na falls back to the upload's filename, which
        can be long) and truncates at its column edge — the full string stays
-       in its title attribute. */
+       in its title attribute.
+
+       Opacity is the contrast budget here: the palette's worst light case
+       (hue 60, fg l=13% over bg l=91.5%) needs 0.67 of the foreground to
+       reach 4.5:1, so the old 0.45 resting state sat at 2.5:1. 0.72 clears
+       it at 5.2:1, and the label's own dimming has to stay shallow because
+       the two multiply — 0.72 × 0.94 = 0.68, 4.6:1. */
     footer {
       display: grid;
       grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -502,11 +618,11 @@ ${hasFont ? `    @font-face {
       padding: 20px 24px;
       font-size: 13px;
       white-space: nowrap;
-      opacity: 0.45;
+      opacity: 0.72;
       transition: opacity 240ms ease;
     }
 
-    footer:hover { opacity: 0.85; }
+    footer:hover { opacity: 1; }
 
     /* Grid blockifies these, so text-overflow applies; minmax(0, 1fr) above
        is what lets a column shrink below its content instead of pushing the
@@ -524,7 +640,7 @@ ${hasFont ? `    @font-face {
 
     footer a:hover { text-decoration: underline; }
 
-    footer .label { opacity: 0.6; margin-right: 0.35em; }
+    footer .label { opacity: 0.94; margin-right: 0.35em; }
 
     /* Five columns squeeze the relative times ("about 2 hours ago") to
        nothing well before the layout folds — drop to two, with the title
@@ -547,7 +663,8 @@ ${hasFont ? `    @font-face {
   </nav>
   <main>
     <a class="block" id="block-link" href="${blockUrl}" aria-label="Open this block on Are.na">
-      <img id="block-img" src="${esc(t.src)}" width="${t.w}" height="${t.h}" alt="${esc(t.t)}">
+      <img id="block-img" src="${esc(t.src)}"${srcset ? `\n           srcset="${srcset}" sizes="${sizes}"` : ""}
+           width="${t.w}" height="${t.h}" alt="${esc(t.t)}" fetchpriority="high" decoding="async">
     </a>
   </main>
   <footer>
@@ -555,12 +672,15 @@ ${hasFont ? `    @font-face {
     <span><span class="label">added</span><span id="m-added">${esc(t.a)}</span></span>
     <span><span class="label">modified</span><span id="m-modified">${esc(t.m)}</span></span>
     <a id="m-by" href="https://www.are.na/${esc(t.bys)}"><span class="label">by</span><span id="m-by-name">${esc(t.by)}</span></a>
-    <span id="m-dims">${t.w} × ${t.h}</span>
+    <span id="m-dims">${t.w && t.h ? `${t.w} × ${t.h}` : ""}</span>
   </footer>
   <script>
   (function () {
     var DAYS = ${daysJson};
     var N = DAYS.length;
+    // Today's candidate set, kept so that scrubbing home restores the very
+    // rendition the page loaded rather than falling back to the widest 1x.
+    var HERO_SRCSET = ${JSON.stringify(srcset)};
     var reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
     var scrub = document.getElementById("scrub");
     var ruler = document.getElementById("ticks");
@@ -575,7 +695,17 @@ ${hasFont ? `    @font-face {
     var elByName = document.getElementById("m-by-name");
     var elDims = document.getElementById("m-dims");
     var favicon = document.getElementById("favicon");
-    var rootStyle = document.documentElement.style;
+    var themeColor = document.getElementById("theme-color");
+    var root = document.documentElement;
+    var rootStyle = root.style;
+
+    // Light palettes are baked at l=91.5%, dark ones at l=10% — the trailing
+    // lightness of the day's background is its mood, and the mood is what
+    // picks the glass tint.
+    function moodOf(bg) {
+      var m = /([\\d.]+)%\\s*\\)$/.exec(bg);
+      return m && parseFloat(m[1]) < 50 ? "dark" : "light";
+    }
 
     var SPACING = 8;   // ticks sit on a fixed 8px pitch
     var INSET = 28;
@@ -588,6 +718,10 @@ ${hasFont ? `    @font-face {
     function frac(i) { return N === 1 ? 0 : i / (N - 1); }
     function clamp01(v) { return Math.max(0, Math.min(1, v)); }
     function usable() { return Math.max(1, scrub.clientWidth - INSET * 2); }
+    // The ruler lives inside the strip, which floats inset from the viewport:
+    // every pointer reading has to come back to strip-local coordinates first
+    // or the day under the cursor is the day one inset to its left.
+    function localX(e) { return e.clientX - scrub.getBoundingClientRect().left; }
     function overflow() { return (N - 1) * SPACING > usable(); }
 
     // Where the strip rests when the pointer is away: the selected tick at
@@ -636,10 +770,28 @@ ${hasFont ? `    @font-face {
       label.style.transform = "translateX(" + x + "px) translateX(-50%)";
     }
 
+    // The drawn width is capped by max-width min(88vw, 720px) and by
+    // max-height 66svh, which on a w:h block is 66 × w/h of width — the same
+    // three terms the build bakes for today, worked out per day.
+    function sizesFor(day) {
+      if (!(day.w > 0 && day.h > 0)) return "min(88vw, 720px)";
+      return "min(88vw, 720px, " + +((66 * day.w) / day.h).toFixed(3) + "svh)";
+    }
+
     function swapImage(day) {
       var pre = new Image();
       pre.onload = function () {
         if (DAYS[sel] !== day) return;
+        // The baked candidate set belongs to today's block alone; every
+        // other day carries a single src, so sizes has nothing to pick from
+        // and comes off with it.
+        if (day === DAYS[N - 1] && HERO_SRCSET) {
+          img.sizes = sizesFor(day);
+          img.srcset = HERO_SRCSET;
+        } else {
+          img.removeAttribute("srcset");
+          img.removeAttribute("sizes");
+        }
         img.src = day.src;
         img.width = day.w;
         img.height = day.h;
@@ -654,6 +806,8 @@ ${hasFont ? `    @font-face {
       rootStyle.setProperty("--bg", day.bg);
       rootStyle.setProperty("--fg", day.fg);
       rootStyle.setProperty("--edge", day.e);
+      root.setAttribute("data-mood", moodOf(day.bg));
+      themeColor.setAttribute("content", day.bg);
       var url = "https://www.are.na/block/" + day.id;
       link.href = url;
       elTitle.href = url;
@@ -663,7 +817,9 @@ ${hasFont ? `    @font-face {
       elMod.textContent = day.m;
       elBy.href = "https://www.are.na/" + day.bys;
       elByName.textContent = day.by;
-      elDims.textContent = day.w + " \\u00d7 " + day.h;
+      // Are.na omits dimensions on some blocks; leave the cell empty rather
+      // than printing "null × null".
+      elDims.textContent = day.w && day.h ? day.w + " \\u00d7 " + day.h : "";
       favicon.href = "data:image/svg+xml," + encodeURIComponent(
         '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" fill="' + day.dm + '"/></svg>'
       );
@@ -715,18 +871,20 @@ ${hasFont ? `    @font-face {
     function wake() { if (!raf) raf = requestAnimationFrame(loop); }
 
     scrub.addEventListener("pointermove", function (e) {
-      px = e.clientX;
+      var x = localX(e);
+      px = x;
       hovering = true;
-      stripTarget = panFor(e.clientX);
-      if (dragging) select(dayAt(e.clientX));
+      stripTarget = panFor(x);
+      if (dragging) select(dayAt(x));
       wake();
     });
     scrub.addEventListener("pointerdown", function (e) {
+      var x = localX(e);
       dragging = true;
-      px = e.clientX;
+      px = x;
       hovering = true;
-      stripTarget = panFor(e.clientX);
-      select(dayAt(e.clientX));
+      stripTarget = panFor(x);
+      select(dayAt(x));
       try { scrub.setPointerCapture(e.pointerId); } catch (err) {}
       wake();
       e.preventDefault();
@@ -825,7 +983,13 @@ if (FONT_URL) {
 
 await writeFile(
   path.join(dist, "index.html"),
-  render({ days, channel, hasFont, date: todayPick.date })
+  render({
+    days,
+    channel,
+    hasFont,
+    date: todayPick.date,
+    heroImage: todayPick.block.image,
+  })
 );
 const host = SITE_URL ? new URL(SITE_URL).host : "";
 if (host && !host.endsWith("github.io"))
