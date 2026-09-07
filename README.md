@@ -5,7 +5,7 @@ One block a day from an [Are.na](https://www.are.na) channel.
 A block is the atomic value of each save on Are.na. Every day at local midnight this site picks one image block from a channel — deterministically, from the date — and becomes it:
 
 - the page background is a quiet monochromatic tint of the image's dominant colour (eyedropped from the pixels, not a histogram average), light or dark depending on the image's own mood
-- every earlier day is still there: a timeline ruler floats above the block on its own pane of glass — one tick per day since launch, tinted from whichever day you're looking at — and hovering, dragging or arrowing along it scrubs back through the history
+- every earlier day is still there: a timeline ruler sits along the top edge — one tick per day since launch — and hovering, dragging or arrowing along it scrubs back through the history
 - the block's metadata (title · added · modified · by · dimensions) sits across the footer; the image and title link to the block on Are.na, the author links to their profile
 - the Open Graph preview is the image itself with a centered square — the block — set white or black by the luminance beneath it
 - the favicon is a square of the day's dominant colour

@@ -3,11 +3,10 @@
  *
  * Fetches the channel via Are.na's v3 REST API and picks one image block per
  * day, deterministically from the date. The channel's block count sets the
- * depth of history: N blocks → N days, scrubbable via the timeline ruler on
- * the pane of glass floating above the block. Each day's dominant colour and
- * mood (light/dark) are sampled at build time (cached in .cache/ between runs)
- * and the whole history is baked into a fully static page in dist/. Runs daily
- * via GitHub Actions.
+ * depth of history: N blocks → N days, scrubbable via the timeline ruler at
+ * the top edge. Each day's dominant colour and mood (light/dark) are sampled
+ * at build time (cached in .cache/ between runs) and the whole history is
+ * baked into a fully static page in dist/. Runs daily via GitHub Actions.
  */
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -323,12 +322,6 @@ function dayEntry(date, block, palette) {
 
 // ---------------------------------------------------------------------------
 
-// A day's mood is already written into its palette: light backgrounds land at
-// l=91.5%, dark ones at l=10%. Reading it back off the baked hsl() keeps the
-// DAYS payload exactly as it has always been.
-const moodOfBg = (bg) =>
-  parseFloat(/([\d.]+)%\s*\)$/.exec(bg)?.[1] ?? "100") < 50 ? "dark" : "light";
-
 // Are.na renders every image at three caps — 400 / 1200 / 1800 on the long
 // edge, doubled for the @2x variants. It reports each rendition at the size
 // the cap implies, but resizes `withoutEnlargement`, so a 540px-wide original
@@ -386,7 +379,7 @@ function render({ days, channel, hasFont, date, heroImage }) {
   ].filter(Boolean);
 
   return `<!doctype html>
-<html lang="en" data-mood="${moodOfBg(t.bg)}">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -415,23 +408,6 @@ ${hasFont ? `    @font-face {
       --bg: ${t.bg};
       --fg: ${t.fg};
       --edge: ${t.e};
-
-      /* Liquid glass — the same material the rest of the sites use, mixed
-         from the day's own palette so the strip belongs to the image it
-         floats over. */
-      --glass-bg: color-mix(in srgb, var(--bg) 62%, transparent);
-      --glass-blur: blur(24px) saturate(160%);
-      --glass-edge: inset 0 0 0 1px color-mix(in srgb, var(--fg) 10%, transparent);
-      --glass-specular: inset 0 1px 0 color-mix(in srgb, white 45%, transparent);
-      --glass-shadow: 0 1px 2px rgba(13, 27, 30, 0.06), 0 24px 64px rgba(13, 27, 30, 0.18);
-      --glass-radius: 24px;
-    }
-
-    /* Dark days: thinner tint so the image still reads through, and a
-       specular edge that isn't a white line across a black page. */
-    :root[data-mood="dark"] {
-      --glass-bg: color-mix(in srgb, var(--bg) 52%, transparent);
-      --glass-specular: inset 0 1px 0 color-mix(in srgb, white 12%, transparent);
     }
 
     *, *::before, *::after { box-sizing: border-box; }
@@ -456,47 +432,34 @@ ${hasFont ? `    @font-face {
     /* Timeline ruler — one tick per day at a fixed 8px pitch, day 1 first,
        today last. The strip is wider than the viewport and pans under the
        pointer faster than the pointer moves (parallax), so the whole
-       history is always reachable. It is this page's only control, so it
-       rides on its own pane of glass above the block rather than sitting
-       flat on the page. */
+       history is always reachable. */
     #scrub {
       position: fixed;
-      top: 12px;
-      left: 12px;
-      right: 12px;
-      height: 56px;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 72px;
       z-index: 10;
-      border-radius: var(--glass-radius);
-      background: var(--glass-bg);
-      -webkit-backdrop-filter: var(--glass-blur);
-      backdrop-filter: var(--glass-blur);
-      box-shadow: var(--glass-edge), var(--glass-specular), var(--glass-shadow);
       cursor: ew-resize;
       touch-action: none;
       -webkit-user-select: none;
       user-select: none;
-      outline: none;
-      transition: background-color 400ms ease;
     }
 
-    @media (min-width: 900px) {
-      #scrub { top: 16px; left: 16px; right: 16px; }
-    }
-
-    /* The zone loses its outline to the glass, so put the focus ring on the
-       pane itself, outside the three shadows that build the material. */
+    /* Keyboard focus lands on the zone itself; the ruler is the only thing
+       drawn in it, so ring the zone and inset the ring so it doesn't sit
+       half off the top of the viewport. */
     #scrub:focus-visible {
-      box-shadow: var(--glass-edge), var(--glass-specular), var(--glass-shadow),
-                  0 0 0 2px color-mix(in srgb, var(--fg) 45%, transparent);
+      outline: 2px solid color-mix(in srgb, var(--fg) 45%, transparent);
+      outline-offset: -2px;
     }
 
-    /* The ruler is wider than the pane — clip it to the pane's rounded box
-       without clipping the date label, which hangs below the glass. */
+    /* The strip is wider than the viewport — clip it without clipping the
+       date label, which hangs below the scrub zone. */
     #clip {
       position: absolute;
       inset: 0;
       overflow: hidden;
-      border-radius: inherit;
     }
 
     #ticks {
@@ -507,16 +470,14 @@ ${hasFont ? `    @font-face {
       will-change: transform;
     }
 
-    /* Centred in the pane and magnified about their middle, so a tick under
-       the pointer grows into the glass in both directions. */
     #ticks i {
       position: absolute;
-      top: calc(50% - 6.5px);
+      top: 0;
       width: 1px;
       height: 13px;
       background: currentColor;
       opacity: 0.26;
-      transform-origin: center;
+      transform-origin: top center;
       animation: tick-in 600ms ease-out backwards;
     }
 
@@ -529,7 +490,7 @@ ${hasFont ? `    @font-face {
       top: 0;
       left: 0;
       width: 1px;
-      height: 100%;
+      height: 30px;
       background: currentColor;
       opacity: 0.85;
       pointer-events: none;
@@ -538,7 +499,7 @@ ${hasFont ? `    @font-face {
 
     #sel-label {
       position: absolute;
-      top: calc(100% + 10px);
+      top: 38px;
       left: 0;
       writing-mode: vertical-rl;
       font-size: 11px;
@@ -551,20 +512,10 @@ ${hasFont ? `    @font-face {
 
     @media (prefers-reduced-motion: reduce) {
       #ticks i { animation: none; }
-      #scrub { transition: none; }
     }
 
-    /* No blur to sample through: fall back to a near-solid pane. */
-    @media (prefers-reduced-transparency: reduce) {
-      #scrub {
-        background: color-mix(in srgb, var(--bg) 96%, transparent);
-        -webkit-backdrop-filter: none;
-        backdrop-filter: none;
-      }
-    }
-
-    /* The top padding clears the floating strip (16 + 56 at its lowest) with
-       room to spare, so the block never slides under the glass. */
+    /* The top padding clears the scrub zone with room to spare, so the block
+       never slides under the ruler. */
     main {
       flex: 1;
       display: grid;
@@ -696,16 +647,7 @@ ${hasFont ? `    @font-face {
     var elDims = document.getElementById("m-dims");
     var favicon = document.getElementById("favicon");
     var themeColor = document.getElementById("theme-color");
-    var root = document.documentElement;
-    var rootStyle = root.style;
-
-    // Light palettes are baked at l=91.5%, dark ones at l=10% — the trailing
-    // lightness of the day's background is its mood, and the mood is what
-    // picks the glass tint.
-    function moodOf(bg) {
-      var m = /([\\d.]+)%\\s*\\)$/.exec(bg);
-      return m && parseFloat(m[1]) < 50 ? "dark" : "light";
-    }
+    var rootStyle = document.documentElement.style;
 
     var SPACING = 8;   // ticks sit on a fixed 8px pitch
     var INSET = 28;
@@ -806,7 +748,6 @@ ${hasFont ? `    @font-face {
       rootStyle.setProperty("--bg", day.bg);
       rootStyle.setProperty("--fg", day.fg);
       rootStyle.setProperty("--edge", day.e);
-      root.setAttribute("data-mood", moodOf(day.bg));
       themeColor.setAttribute("content", day.bg);
       var url = "https://www.are.na/block/" + day.id;
       link.href = url;
