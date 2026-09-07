@@ -1,0 +1,4 @@
+# Match the version CI builds on (.github/workflows/deploy.yml), so a local
+# `npm ci` resolves the same sharp binaries as the daily deploy.
+[tools]
+node = "26"
