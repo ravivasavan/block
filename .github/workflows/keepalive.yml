@@ -1,0 +1,30 @@
+name: keepalive
+
+# GitHub disables scheduled workflows after 60 days without repository
+# activity. This weekly job makes an empty commit when the repo has been
+# quiet for 50 days, so the daily deploy schedule keeps running.
+on:
+  schedule:
+    - cron: "17 6 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Commit if the repo has been inactive
+        run: |
+          last=$(git log -1 --format=%ct)
+          cutoff=$(date -u -d '50 days ago' +%s)
+          if [ "$last" -lt "$cutoff" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit --allow-empty -m "chore: keep scheduled workflows active"
+            git push
+          else
+            echo "Recent activity exists; nothing to do."
+          fi
